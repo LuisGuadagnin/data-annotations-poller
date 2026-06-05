@@ -5,18 +5,17 @@ import * as iam from "aws-cdk-lib/aws-iam";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as logs from "aws-cdk-lib/aws-logs";
 import * as scheduler from "aws-cdk-lib/aws-scheduler";
+import * as ses from "aws-cdk-lib/aws-ses";
 import { PythonFunction } from "@aws-cdk/aws-lambda-python-alpha";
 import * as path from "path";
 
 export interface TaskWatcherStackProps extends cdk.StackProps {
   /** SSM SecureString parameter holding the session cookie. */
   readonly cookieParamName: string;
-  /** SSM SecureString parameter holding the Gmail app password. */
-  readonly gmailParamName: string;
-  /** Gmail address alerts are sent FROM. */
-  readonly gmailAddress: string;
-  /** Address alerts are sent TO. */
-  readonly alertRecipient: string;
+  /** Email address alerts are sent FROM (verified as an SES identity). */
+  readonly senderEmail: string;
+  /** Email address alerts are sent TO. */
+  readonly recipientEmail: string;
   /** How many days to remember a seen project (DynamoDB TTL). */
   readonly seenTtlDays: string;
 }
@@ -51,17 +50,16 @@ export class TaskWatcherStack extends cdk.Stack {
       environment: {
         TABLE_NAME: table.tableName,
         COOKIE_PARAM_NAME: props.cookieParamName,
-        GMAIL_PARAM_NAME: props.gmailParamName,
-        GMAIL_ADDRESS: props.gmailAddress,
-        ALERT_RECIPIENT: props.alertRecipient,
+        SENDER_EMAIL: props.senderEmail,
+        RECIPIENT_EMAIL: props.recipientEmail,
         SEEN_TTL_DAYS: props.seenTtlDays,
       },
     });
 
     table.grantReadWriteData(fn);
 
-    // ---- Read access to the two SecureString parameters ----
-    // The parameters are created out-of-band (CloudFormation can't make
+    // ---- Read access to the cookie SecureString parameter ----
+    // The parameter is created out-of-band (CloudFormation can't make
     // SecureString values), so we only grant read here.
     const paramArn = (name: string) =>
       cdk.Stack.of(this).formatArn({
@@ -74,7 +72,7 @@ export class TaskWatcherStack extends cdk.Stack {
     fn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ["ssm:GetParameter"],
-        resources: [paramArn(props.cookieParamName), paramArn(props.gmailParamName)],
+        resources: [paramArn(props.cookieParamName)],
       })
     );
 
@@ -86,6 +84,32 @@ export class TaskWatcherStack extends cdk.Stack {
         conditions: {
           StringEquals: { "kms:ViaService": `ssm.${this.region}.amazonaws.com` },
         },
+      })
+    );
+
+    // ---- SES: verify the sender (and recipient, for the sandbox) ----
+    // Email identities require a one-time click on the verification email SES
+    // sends; until verified, send_email calls will fail.
+    new ses.EmailIdentity(this, "SenderIdentity", {
+      identity: ses.Identity.email(props.senderEmail),
+    });
+    if (props.recipientEmail !== props.senderEmail) {
+      new ses.EmailIdentity(this, "RecipientIdentity", {
+        identity: ses.Identity.email(props.recipientEmail),
+      });
+    }
+
+    // Allow sending only from the verified sender identity.
+    fn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ses:SendEmail"],
+        resources: [
+          cdk.Stack.of(this).formatArn({
+            service: "ses",
+            resource: "identity",
+            resourceName: props.senderEmail,
+          }),
+        ],
       })
     );
 
@@ -108,6 +132,6 @@ export class TaskWatcherStack extends cdk.Stack {
     new cdk.CfnOutput(this, "FunctionName", { value: fn.functionName });
     new cdk.CfnOutput(this, "TableName", { value: table.tableName });
     new cdk.CfnOutput(this, "CookieParamName", { value: props.cookieParamName });
-    new cdk.CfnOutput(this, "GmailParamName", { value: props.gmailParamName });
+    new cdk.CfnOutput(this, "SenderEmail", { value: props.senderEmail });
   }
 }

@@ -10,8 +10,6 @@ Ported from the original local `task_watcher.py`.
 
 import re
 import json
-import smtplib
-from email.message import EmailMessage
 
 import requests
 from bs4 import BeautifulSoup
@@ -144,33 +142,15 @@ def build_email_body(new_projects):
     )
 
 
-def _send(sender, recipient, app_password, subject, body):
-    """Send one plain-text email via Gmail SMTP."""
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = sender
-    msg["To"] = recipient
-    msg.set_content(body)
-
-    with smtplib.SMTP("smtp.gmail.com", 587) as server:
-        server.starttls()
-        server.login(sender, app_password)
-        server.send_message(msg)
+def new_projects_email(new_projects):
+    """Return (subject, body) for a new-projects alert."""
+    subject = f"🚨 {len(new_projects)} new task(s) available!"
+    return subject, build_email_body(new_projects)
 
 
-def send_email(new_projects, sender, recipient, app_password):
-    """Email an alert listing the new projects."""
-    _send(
-        sender,
-        recipient,
-        app_password,
-        subject=f"🚨 {len(new_projects)} new task(s) available!",
-        body=build_email_body(new_projects),
-    )
-
-
-def send_cookie_expired_email(sender, recipient, app_password):
-    """Notify that the session cookie expired and must be refreshed in SSM."""
+def cookie_expired_email():
+    """Return (subject, body) telling you to refresh the session cookie in SSM."""
+    subject = "⚠️ Task watcher: session cookie expired"
     body = (
         "Your DataAnnotation session cookie has expired, so the watcher can no "
         "longer check for new projects.\n\n"
@@ -183,10 +163,4 @@ def send_cookie_expired_email(sender, recipient, app_password):
         "You will get this alert only once per expiry; checks resume "
         "automatically once the cookie is valid again.\n"
     )
-    _send(
-        sender,
-        recipient,
-        app_password,
-        subject="⚠️ Task watcher: session cookie expired",
-        body=body,
-    )
+    return subject, body

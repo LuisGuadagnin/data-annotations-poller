@@ -2,12 +2,13 @@
 handler.py
 ----------
 Lambda entry point. Runs a single check per invocation (the EventBridge
-Scheduler is the "loop"). Wires SSM (cookie + Gmail password) and DynamoDB
-(seen projects + cookie-status flag) around the pure logic in watcher.py.
+Scheduler is the "loop"). Wires SSM (the session cookie), DynamoDB (seen
+projects + cookie-status flag), and SES (alert emails) around the pure logic
+in watcher.py.
 
 Config comes from environment variables set by the CDK stack:
-  TABLE_NAME, COOKIE_PARAM_NAME, GMAIL_PARAM_NAME,
-  GMAIL_ADDRESS, ALERT_RECIPIENT, SEEN_TTL_DAYS (default 7)
+  TABLE_NAME, COOKIE_PARAM_NAME,
+  SENDER_EMAIL, RECIPIENT_EMAIL, SEEN_TTL_DAYS (default 7)
 """
 
 import os
@@ -21,9 +22,8 @@ import watcher
 
 TABLE_NAME = os.environ["TABLE_NAME"]
 COOKIE_PARAM_NAME = os.environ["COOKIE_PARAM_NAME"]
-GMAIL_PARAM_NAME = os.environ["GMAIL_PARAM_NAME"]
-GMAIL_ADDRESS = os.environ["GMAIL_ADDRESS"]
-ALERT_RECIPIENT = os.environ["ALERT_RECIPIENT"]
+SENDER_EMAIL = os.environ["SENDER_EMAIL"]
+RECIPIENT_EMAIL = os.environ["RECIPIENT_EMAIL"]
 SEEN_TTL_DAYS = int(os.environ.get("SEEN_TTL_DAYS", "7"))
 
 # Reserved partition keys (project IDs are UUIDs, so these never collide).
@@ -31,6 +31,7 @@ STATUS_PK = "__cookie_status__"
 INIT_PK = "__initialized__"
 
 _ssm = boto3.client("ssm")
+_ses = boto3.client("sesv2")
 _table = boto3.resource("dynamodb").Table(TABLE_NAME)
 
 
@@ -38,6 +39,20 @@ def _get_secret(name):
     """Read a SecureString SSM parameter, decrypted."""
     resp = _ssm.get_parameter(Name=name, WithDecryption=True)
     return resp["Parameter"]["Value"]
+
+
+def _send_email(subject, body):
+    """Send one plain-text alert via SES."""
+    _ses.send_email(
+        FromEmailAddress=SENDER_EMAIL,
+        Destination={"ToAddresses": [RECIPIENT_EMAIL]},
+        Content={
+            "Simple": {
+                "Subject": {"Data": subject},
+                "Body": {"Text": {"Data": body}},
+            }
+        },
+    )
 
 
 def _item_exists(pk):
@@ -87,9 +102,8 @@ def _send_test_email():
         "pay": "$75.00/hr",
         "tasks": "3",
     }]
-    watcher.send_email(sample, GMAIL_ADDRESS, ALERT_RECIPIENT,
-                       _get_secret(GMAIL_PARAM_NAME))
-    print(f"Sent test alert to {ALERT_RECIPIENT}.", flush=True)
+    _send_email(*watcher.new_projects_email(sample))
+    print(f"Sent test alert to {RECIPIENT_EMAIL}.", flush=True)
 
 
 def handler(event, context):
@@ -111,8 +125,7 @@ def handler(event, context):
         if _cookie_already_alerted():
             print("Session still expired; already alerted.", flush=True)
         else:
-            watcher.send_cookie_expired_email(
-                GMAIL_ADDRESS, ALERT_RECIPIENT, _get_secret(GMAIL_PARAM_NAME))
+            _send_email(*watcher.cookie_expired_email())
             _mark_cookie_alerted()
             print("Session expired; sent one-time alert.", flush=True)
         return {"ok": False, "reason": "cookie-expired"}
@@ -135,8 +148,7 @@ def handler(event, context):
     new_projects = [p for p in projects if _put_if_new(p)]
 
     if new_projects:
-        watcher.send_email(new_projects, GMAIL_ADDRESS, ALERT_RECIPIENT,
-                           _get_secret(GMAIL_PARAM_NAME))
+        _send_email(*watcher.new_projects_email(new_projects))
         print(f"NEW: emailed alert for {len(new_projects)} project(s).",
               flush=True)
     else:
