@@ -10,3 +10,10 @@ __pycache__/
 
 # Generated diagnostic output
 diagnosis.txt
+
+# Node / CDK
+node_modules/
+cdk.out/
+*.js.map
+cdk/bin/*.js
+cdk/lib/*.js
