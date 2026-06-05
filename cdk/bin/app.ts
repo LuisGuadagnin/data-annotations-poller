@@ -19,7 +19,7 @@ const required = (key: string, envVar: string): string => {
   return value;
 };
 
-const gmailAddress = required("gmailAddress", "GMAIL_ADDRESS");
+const senderEmail = required("senderEmail", "SENDER_EMAIL");
 
 new TaskWatcherStack(app, "TaskWatcherStack", {
   env: {
@@ -28,10 +28,8 @@ new TaskWatcherStack(app, "TaskWatcherStack", {
   },
   // Override any of these via `cdk deploy -c key=value` if you like.
   cookieParamName: fromContext("cookieParamName", "COOKIE_PARAM_NAME") ?? "/task-watcher/cookie",
-  gmailParamName:
-    fromContext("gmailParamName", "GMAIL_PARAM_NAME") ?? "/task-watcher/gmail-app-password",
-  gmailAddress,
+  senderEmail,
   // Defaults to the sender if a separate recipient isn't given.
-  alertRecipient: fromContext("alertRecipient", "ALERT_RECIPIENT") ?? gmailAddress,
+  recipientEmail: fromContext("recipientEmail", "RECIPIENT_EMAIL") ?? senderEmail,
   seenTtlDays: fromContext("seenTtlDays", "SEEN_TTL_DAYS") ?? "7",
 });

@@ -13,8 +13,9 @@ once (you handle login + 2FA yourself in the browser, no password lives here).
 - **EventBridge Scheduler** triggers it every minute.
 - **DynamoDB** remembers which projects we've already seen (with a TTL so it
   self-prunes) and a one-shot "cookie expired" flag.
-- **SSM Parameter Store (SecureString)** holds the session cookie and the Gmail
-  app password — update them without redeploying.
+- **SSM Parameter Store (SecureString)** holds the session cookie — update it
+  without redeploying.
+- **SES** sends the alert emails from a verified sender identity.
 - **AWS CDK (TypeScript)** in `cdk/` provisions all of it.
 
 When the session cookie expires you get **one** email; checks resume
@@ -32,25 +33,20 @@ cdk/      bin/app.ts, lib/task-watcher-stack.ts
 - An AWS account with the **AWS CLI configured** (`aws configure`).
 - **Node.js 18+** and **Docker running** (CDK bundles the Python deps in Docker
   at deploy time).
-- A **Gmail App Password** (needs 2-Step Verification on):
-  https://myaccount.google.com/apppasswords
+- An **email address you control** to send alerts from (you'll verify it in SES).
 
 ---
 
 ## One-time setup
 
-### 1. Store your secrets in SSM
+### 1. Store the session cookie in SSM
 
-These values never touch git or the CDK source.
+This value never touches git or the CDK source.
 
 ```bash
-# Session cookie — see "Getting the cookie" below for how to produce cookie.txt
+# See "Getting the cookie" below for how to produce cookie.txt
 aws ssm put-parameter --name "/task-watcher/cookie" --type SecureString \
   --value "$(cat cookie.txt)"
-
-# Gmail app password
-aws ssm put-parameter --name "/task-watcher/gmail-app-password" --type SecureString \
-  --value "your16charapppassword"
 ```
 
 ### 2. Deploy the infrastructure
@@ -59,15 +55,23 @@ aws ssm put-parameter --name "/task-watcher/gmail-app-password" --type SecureStr
 cd cdk
 npm install
 npx cdk bootstrap     # first time per account/region only
-npx cdk deploy -c gmailAddress=you@example.com
+npx cdk deploy -c senderEmail=you@example.com
 ```
 
-The output prints the function name, table name, and the two SSM parameter names.
+The output prints the function name, table name, and the sender email.
 
-> `gmailAddress` (the address alerts are sent **from**) is required — pass it with
-> `-c gmailAddress=...` or the `GMAIL_ADDRESS` env var. Alerts are sent **to** the
-> same address unless you override with `-c alertRecipient=other@example.com`
-> (or the `ALERT_RECIPIENT` env var).
+> `senderEmail` (the address alerts are sent **from**) is required — pass it with
+> `-c senderEmail=...` or the `SENDER_EMAIL` env var. Alerts are sent **to** the
+> same address unless you override with `-c recipientEmail=other@example.com`
+> (or the `RECIPIENT_EMAIL` env var).
+
+### 3. Verify the SES identity
+
+Deploying creates an SES email identity for your sender address. SES emails that
+address a verification link — **click it** before alerts can be sent. (If sender
+and recipient differ, verify the recipient too: SES starts in the *sandbox*, which
+only delivers to verified addresses. Sending to yourself needs no production-access
+request.)
 
 ---
 
@@ -102,7 +106,7 @@ The next scheduled run picks it up and re-arms the expiry alert.
 ## Verifying it works
 
 ```bash
-# Send a sample alert to confirm Gmail works
+# Send a sample alert to confirm SES works
 aws lambda invoke --function-name <FunctionName> \
   --payload '{"action":"test-email"}' /dev/stdout
 
@@ -123,5 +127,5 @@ summaries.
   lower — hammering the site is impolite.
 - Seen projects expire from DynamoDB after `SEEN_TTL_DAYS` (default 7), so the
   table stays small.
-- `cdk destroy` tears everything down. The SSM parameters are created out-of-band,
-  so delete them separately if you want them gone.
+- `cdk destroy` tears everything down. The cookie SSM parameter is created
+  out-of-band, so delete it separately if you want it gone.
