@@ -1,0 +1,12 @@
+# Files containing personal/session information
+cookie.txt
+seen_projects.json
+last_page.html
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Generated diagnostic output
+diagnosis.txt
