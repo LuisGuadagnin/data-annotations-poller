@@ -1,90 +1,127 @@
-# Task Watcher
+# Task Watcher (AWS)
 
 Watches DataAnnotation's projects page and emails you the moment a **new
-project** appears in the table.
+project** appears — running unattended in the cloud, so you don't have to keep a
+machine on.
 
 It reuses your existing **logged-in browser session** via a cookie you paste in
-once — so you handle login + 2FA yourself in the browser, and no password ever
-lives in the script.
+once (you handle login + 2FA yourself in the browser, no password lives here).
 
-> **Why paste a cookie?** Modern Chrome (v127+) encrypts its cookie store so
-> outside tools can't read it automatically. Pasting the cookie sidesteps that
-> cleanly.
+## Architecture
+
+- **Lambda** (`lambda/`) runs a single check per invocation.
+- **EventBridge Scheduler** triggers it every minute.
+- **DynamoDB** remembers which projects we've already seen (with a TTL so it
+  self-prunes) and a one-shot "cookie expired" flag.
+- **SSM Parameter Store (SecureString)** holds the session cookie and the Gmail
+  app password — update them without redeploying.
+- **AWS CDK (TypeScript)** in `cdk/` provisions all of it.
+
+When the session cookie expires you get **one** email; checks resume
+automatically once you refresh the cookie parameter.
+
+```
+lambda/   handler.py (entry), watcher.py (fetch/parse/email), requirements.txt
+cdk/      bin/app.ts, lib/task-watcher-stack.ts
+```
 
 ---
 
-## Setup steps
+## Prerequisites
 
-### 1. Install dependencies
+- An AWS account with the **AWS CLI configured** (`aws configure`).
+- **Node.js 18+** and **Docker running** (CDK bundles the Python deps in Docker
+  at deploy time).
+- A **Gmail App Password** (needs 2-Step Verification on):
+  https://myaccount.google.com/apppasswords
+
+---
+
+## One-time setup
+
+### 1. Store your secrets in SSM
+
+These values never touch git or the CDK source.
+
 ```bash
-python.exe -m pip install -r requirements.txt
+# Session cookie — see "Getting the cookie" below for how to produce cookie.txt
+aws ssm put-parameter --name "/task-watcher/cookie" --type SecureString \
+  --value "$(cat cookie.txt)"
+
+# Gmail app password
+aws ssm put-parameter --name "/task-watcher/gmail-app-password" --type SecureString \
+  --value "your16charapppassword"
 ```
-(`python.exe` is your Windows Python. Any Python 3 with these packages works.)
 
-### 2. Set up the Gmail App Password
-1. Turn on 2-Step Verification: https://myaccount.google.com/security
-2. Create an App Password: https://myaccount.google.com/apppasswords
-3. Set it as an environment variable (so it isn't saved in the file):
-   ```powershell
-   setx GMAIL_APP_PASSWORD "your16charpassword"
-   ```
-   Reopen the terminal after `setx` so it takes effect.
+### 2. Deploy the infrastructure
 
-The `GMAIL_ADDRESS` / `ALERT_RECIPIENT` in the script are already set to your
-Gmail — change them if you want alerts sent elsewhere.
+```bash
+cd cdk
+npm install
+npx cdk bootstrap     # first time per account/region only
+npx cdk deploy -c gmailAddress=you@example.com
+```
 
-### 3. Add your session cookie  →  `cookie.txt`
+The output prints the function name, table name, and the two SSM parameter names.
+
+> `gmailAddress` (the address alerts are sent **from**) is required — pass it with
+> `-c gmailAddress=...` or the `GMAIL_ADDRESS` env var. Alerts are sent **to** the
+> same address unless you override with `-c alertRecipient=other@example.com`
+> (or the `ALERT_RECIPIENT` env var).
+
+---
+
+## Getting the cookie (`cookie.txt`)
+
 1. Log in to https://app.dataannotation.tech in **Chrome** (do your 2FA).
-2. Go to the projects page, press **F12**, open the **Network** tab.
-3. Check the **Doc** (or **All**) filter and **reload** the page (F5).
+2. Open the projects page, press **F12**, open the **Network** tab.
+3. Filter to **Doc** (or **All**) and **reload** (F5).
 4. Click the top request named **`projects`**.
-5. Right-click it → **Copy** → **Copy as cURL (bash)**.
-6. Paste that into a file named **`cookie.txt`** next to the script. Save.
+5. Right-click → **Copy** → **Copy as cURL (bash)**.
+6. Paste into a file named **`cookie.txt`**. Save.
 
-That's it — the script pulls the cookie out of the cURL text automatically.
-(You can also paste just a raw `name=value; name2=value2` cookie string if you
-prefer.)
-
-### 4. Run it
-```bash
-python.exe task_watcher.py
-```
-
-Keep the terminal open. The **first run** records what's already listed (so you
-aren't spammed about existing projects). After that, any new project triggers an
-email within ~60 seconds.
-
-### Test the email setup
-To confirm Gmail works without waiting for a real new project, send a sample
-alert and exit:
-```bash
-python.exe task_watcher.py --test-email
-```
-Check your inbox (and spam folder) for a "TEST — sample alert" message.
+The handler pulls the cookie out of the cURL text automatically (a raw
+`name=value; name2=value2` string also works).
 
 ---
 
 ## When the session expires
 
-If you see `Session expired. Re-copy your cookie…`, just:
-1. Make sure you're still logged in at app.dataannotation.tech in Chrome.
-2. Redo step 3 (copy as cURL → overwrite `cookie.txt`).
+You'll get a one-time "session cookie expired" email. To fix it, redo the cookie
+steps above, then overwrite the parameter (no redeploy needed):
 
-No need to restart the script — it re-reads `cookie.txt` on every check.
+```bash
+aws ssm put-parameter --name "/task-watcher/cookie" --type SecureString \
+  --value "$(cat cookie.txt)" --overwrite
+```
+
+The next scheduled run picks it up and re-arms the expiry alert.
 
 ---
 
-## How it works
+## Verifying it works
 
-1. Reads your session cookie from `cookie.txt`.
-2. Fetches the projects page as if it were your browser.
-3. Parses the table — each project's name cell (`td[data-column-id="name"]`).
-4. Compares against `seen_projects.json` (auto-created).
-5. Emails you about anything new, then waits and repeats.
+```bash
+# Send a sample alert to confirm Gmail works
+aws lambda invoke --function-name <FunctionName> \
+  --payload '{"action":"test-email"}' /dev/stdout
+
+# Force a normal check now (instead of waiting for the schedule)
+aws lambda invoke --function-name <FunctionName> --payload '{}' /dev/stdout
+```
+
+The **first real run** records a baseline of currently-listed projects (no email)
+so you aren't spammed about existing ones. After that, any new project triggers an
+email within ~60 seconds. Check the function's **CloudWatch Logs** for per-run
+summaries.
+
+---
 
 ## Notes
-- Default check interval is 60s (`CHECK_INTERVAL_SECONDS` in the script). Don't
-  go too low — hammering the site is impolite. 30s is a reasonable floor.
-- Delete `seen_projects.json` to reset the "seen" memory.
-- `cookie.txt` contains a live session — keep it private, don't share it.
-- Stop the script with `Ctrl+C`.
+
+- Default check interval is every minute (`rate(1 minute)` in the stack). Don't go
+  lower — hammering the site is impolite.
+- Seen projects expire from DynamoDB after `SEEN_TTL_DAYS` (default 7), so the
+  table stays small.
+- `cdk destroy` tears everything down. The SSM parameters are created out-of-band,
+  so delete them separately if you want them gone.
