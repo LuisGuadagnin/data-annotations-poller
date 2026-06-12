@@ -20,6 +20,7 @@ const required = (key: string, envVar: string): string => {
 };
 
 const senderEmail = required("senderEmail", "SENDER_EMAIL");
+const hostedZoneId = required("hostedZoneId", "HOSTED_ZONE_ID");
 
 new TaskWatcherStack(app, "TaskWatcherStack", {
   env: {
@@ -29,6 +30,7 @@ new TaskWatcherStack(app, "TaskWatcherStack", {
   // Override any of these via `cdk deploy -c key=value` if you like.
   cookieParamName: fromContext("cookieParamName", "COOKIE_PARAM_NAME") ?? "/task-watcher/cookie",
   senderEmail,
+  hostedZoneId,
   // Defaults to the sender if a separate recipient isn't given.
   recipientEmail: fromContext("recipientEmail", "RECIPIENT_EMAIL") ?? senderEmail,
   seenTtlDays: fromContext("seenTtlDays", "SEEN_TTL_DAYS") ?? "7",
