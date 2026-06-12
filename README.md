@@ -33,7 +33,10 @@ cdk/      bin/app.ts, lib/task-watcher-stack.ts
 - An AWS account with the **AWS CLI configured** (`aws configure`).
 - **Node.js 18+** and **Docker running** (CDK bundles the Python deps in Docker
   at deploy time).
-- An **email address you control** to send alerts from (you'll verify it in SES).
+- A **domain you control whose DNS is hosted in Route 53** (e.g.
+  `example.com`). Alerts are sent from an address on this domain (e.g.
+  `alerts@example.com`); CDK writes the DKIM/SPF/DMARC records for you so mail
+  passes authentication and reaches the inbox instead of spam.
 
 ---
 
@@ -55,23 +58,38 @@ aws ssm put-parameter --name "/task-watcher/cookie" --type SecureString \
 cd cdk
 npm install
 npx cdk bootstrap     # first time per account/region only
-npx cdk deploy -c senderEmail=you@example.com
+npx cdk deploy \
+  -c senderEmail=alerts@example.com \
+  -c hostedZoneId=Z0123456789ABCDEFGHIJ \
+  -c recipientEmail=you@gmail.com
 ```
 
 The output prints the function name, table name, and the sender email.
 
-> `senderEmail` (the address alerts are sent **from**) is required — pass it with
-> `-c senderEmail=...` or the `SENDER_EMAIL` env var. Alerts are sent **to** the
-> same address unless you override with `-c recipientEmail=other@example.com`
+> `senderEmail` (the address alerts are sent **from**) and `hostedZoneId` (the
+> Route 53 public hosted zone for that address's **domain**) are both required —
+> pass them with `-c key=value` or the `SENDER_EMAIL` / `HOSTED_ZONE_ID` env
+> vars. Find the zone ID with `aws route53 list-hosted-zones`. Alerts are sent
+> **to** the sender unless you override with `-c recipientEmail=other@gmail.com`
 > (or the `RECIPIENT_EMAIL` env var).
 
-### 3. Verify the SES identity
+### 3. Verify the SES identities
 
-Deploying creates an SES email identity for your sender address. SES emails that
-address a verification link — **click it** before alerts can be sent. (If sender
-and recipient differ, verify the recipient too: SES starts in the *sandbox*, which
-only delivers to verified addresses. Sending to yourself needs no production-access
-request.)
+Deploying creates an SES **domain identity** for the sender's domain and writes
+the Easy-DKIM, MAIL FROM, and DMARC records into Route 53 automatically. The
+domain verifies on its own once DNS propagates (a few minutes) — **no link to
+click**. Check progress with:
+
+```bash
+aws sesv2 get-email-identity --email-identity example.com \
+  --query '{Verified:VerifiedForSendingStatus,DKIM:DkimAttributes.Status}'
+```
+
+SES starts in the *sandbox*, which only delivers to **verified** recipients. If
+the recipient is an address off the sending domain (e.g. your Gmail), the stack
+also creates an email identity for it — **click the verification link** SES
+sends to that address once. Sending to yourself needs no production-access
+request.
 
 ---
 

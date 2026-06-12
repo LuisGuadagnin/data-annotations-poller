@@ -4,6 +4,7 @@ import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as logs from "aws-cdk-lib/aws-logs";
+import * as route53 from "aws-cdk-lib/aws-route53";
 import * as scheduler from "aws-cdk-lib/aws-scheduler";
 import * as ses from "aws-cdk-lib/aws-ses";
 import { PythonFunction } from "@aws-cdk/aws-lambda-python-alpha";
@@ -12,8 +13,10 @@ import * as path from "path";
 export interface TaskWatcherStackProps extends cdk.StackProps {
   /** SSM SecureString parameter holding the session cookie. */
   readonly cookieParamName: string;
-  /** Email address alerts are sent FROM (verified as an SES identity). */
+  /** Email address alerts are sent FROM; its domain is verified in SES. */
   readonly senderEmail: string;
+  /** Route 53 public hosted zone ID for the sender's domain. */
+  readonly hostedZoneId: string;
   /** Email address alerts are sent TO. */
   readonly recipientEmail: string;
   /** How many days to remember a seen project (DynamoDB TTL). */
@@ -87,29 +90,61 @@ export class TaskWatcherStack extends cdk.Stack {
       })
     );
 
-    // ---- SES: verify the sender (and recipient, for the sandbox) ----
-    // Email identities require a one-time click on the verification email SES
-    // sends; until verified, send_email calls will fail.
-    new ses.EmailIdentity(this, "SenderIdentity", {
-      identity: ses.Identity.email(props.senderEmail),
+    // ---- SES: verify the sending DOMAIN (Easy DKIM + custom MAIL FROM) ----
+    // Sending FROM a domain we control (not a freemail @gmail.com address) is
+    // what makes alerts pass DKIM/SPF/DMARC and land in the inbox instead of
+    // spam. Because the zone is in Route 53, CDK writes every record for us:
+    //   - Identity.publicHostedZone -> 3 Easy-DKIM CNAMEs (DKIM alignment)
+    //   - mailFromDomain            -> MAIL FROM MX + SPF TXT (SPF alignment)
+    // The domain verifies automatically once these propagate (no link to click).
+    const senderDomain = props.senderEmail.split("@")[1];
+    const zone = route53.PublicHostedZone.fromPublicHostedZoneAttributes(
+      this,
+      "SenderZone",
+      { hostedZoneId: props.hostedZoneId, zoneName: senderDomain }
+    );
+
+    new ses.EmailIdentity(this, "SenderDomainIdentity", {
+      identity: ses.Identity.publicHostedZone(zone),
+      mailFromDomain: `mail.${senderDomain}`,
     });
-    if (props.recipientEmail !== props.senderEmail) {
-      new ses.EmailIdentity(this, "RecipientIdentity", {
+
+    // DMARC record — CDK doesn't create this. p=none is enough to satisfy
+    // alignment (DKIM/SPF already pass), without quarantining anything.
+    new route53.TxtRecord(this, "DmarcRecord", {
+      zone,
+      recordName: `_dmarc.${senderDomain}`,
+      values: ["v=DMARC1; p=none;"],
+    });
+
+    const sesIdentityArn = (name: string) =>
+      cdk.Stack.of(this).formatArn({
+        service: "ses",
+        resource: "identity",
+        resourceName: name,
+      });
+
+    // ses:SendEmail must be allowed on the sending DOMAIN identity (the FROM)...
+    const sendEmailResources = [sesIdentityArn(senderDomain)];
+
+    // ...and, in the SES sandbox, ALSO on the RECIPIENT's identity: the sandbox
+    // requires the recipient be a verified identity, and SES authorizes the send
+    // against it too. The gmail address was verified by the original stack under
+    // this same logical ID ("SenderIdentity"); we keep that ID stable so
+    // CloudFormation treats it as unchanged rather than replacing it. Both the
+    // identity and the extra grant are skipped when the recipient already lives
+    // on the verified sending domain (covered by the domain identity above).
+    if (props.recipientEmail.split("@")[1] !== senderDomain) {
+      new ses.EmailIdentity(this, "SenderIdentity", {
         identity: ses.Identity.email(props.recipientEmail),
       });
+      sendEmailResources.push(sesIdentityArn(props.recipientEmail));
     }
 
-    // Allow sending only from the verified sender identity.
     fn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ["ses:SendEmail"],
-        resources: [
-          cdk.Stack.of(this).formatArn({
-            service: "ses",
-            resource: "identity",
-            resourceName: props.senderEmail,
-          }),
-        ],
+        resources: sendEmailResources,
       })
     );
 
